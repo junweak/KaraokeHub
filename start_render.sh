@@ -1,18 +1,31 @@
 #!/bin/bash
-set -e
 
 echo "[start] launching WARP proxy..."
-bin/wireproxy --config /tmp/wireproxy.conf &
+bin/wireproxy --config /tmp/wireproxy.conf > /tmp/wireproxy.log 2>&1 &
 WIREPROXY_PID=$!
 
-# wait for SOCKS5 port to be available (max 15s)
-for i in $(seq 1 15); do
-    if nc -z 127.0.0.1 1080 2>/dev/null; then
-        echo "[start] WARP SOCKS5 proxy ready on 127.0.0.1:1080"
+echo "[start] wireproxy PID=$WIREPROXY_PID, waiting for SOCKS5 port..."
+for i in $(seq 1 20); do
+    # check if wireproxy is still alive
+    if ! kill -0 $WIREPROXY_PID 2>/dev/null; then
+        echo "[start] ERROR: wireproxy died! Log:"
+        cat /tmp/wireproxy.log
+        exit 1
+    fi
+    # check if port is open (bash built-in, no nc needed)
+    if timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/1080" 2>/dev/null; then
+        echo "[start] WARP SOCKS5 proxy ready on 127.0.0.1:1080 (took ${i}s)"
         break
     fi
     sleep 1
 done
+
+# final check
+if ! kill -0 $WIREPROXY_PID 2>/dev/null; then
+    echo "[start] ERROR: wireproxy died after startup! Log:"
+    cat /tmp/wireproxy.log
+    exit 1
+fi
 
 export WARP_SOCKS=socks5://127.0.0.1:1080
 export RENDER=true
