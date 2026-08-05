@@ -33,8 +33,10 @@ ROOMS_CACHE_PATH = CACHE_DIR / "rooms.json"
 SUPPORTED_EXT = {".mp3", ".mp4", ".cdg", ".m4a", ".wav", ".webm"}
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "karaokehub-dev-secret"
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "karaokehub-dev-secret")
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+IS_RENDER = bool(os.environ.get("RENDER"))
 
 # ---------------------------------------------------------------------------
 # In-memory room/queue state (persisted to disk for crash recovery)
@@ -145,7 +147,43 @@ def init_db():
         conn.execute("ALTER TABLE songs ADD COLUMN play_count INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS youtube_songs (
+            video_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            artist TEXT DEFAULT '',
+            play_count INTEGER DEFAULT 0,
+            last_played REAL
+        )"""
+    )
     conn.commit()
+    conn.close()
+
+
+def seed_youtube_suggestions():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM youtube_songs")
+    if cur.fetchone()[0] > 0:
+        conn.close()
+        return
+    try:
+        from yt_dlp import YoutubeDL
+        ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info("ytsearch12:popular karaoke songs", download=False)
+            now = time.time()
+            for entry in info.get("entries", []):
+                vid = entry.get("id", "")
+                title = entry.get("title", "Unknown")
+                if vid:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO youtube_songs (video_id, title, artist, play_count, last_played) VALUES (?, ?, '', 1, ?)",
+                        (vid, title, now),
+                    )
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
@@ -250,6 +288,15 @@ def search_youtube(query: str, limit: int = 5, suffix: str = ""):
 
 
 # ---------------------------------------------------------------------------
+# Run startup initialisation at import time (works for both dev & Gunicorn)
+# ---------------------------------------------------------------------------
+init_db()
+load_rooms()
+scan_library()
+seed_youtube_suggestions()
+
+
+# ---------------------------------------------------------------------------
 # Routes — pages
 # ---------------------------------------------------------------------------
 @app.route("/")
@@ -267,8 +314,10 @@ def favicon():
 def host_page(code):
     if code not in rooms:
         return "Room not found or has expired.", 404
-    local_ip = get_local_ip()
-    join_url = f"http://{local_ip}:5000/join/{code}"
+    if IS_RENDER:
+        join_url = f"https://{request.host}/join/{code}"
+    else:
+        join_url = f"http://{get_local_ip()}:5000/join/{code}"
     qr_b64 = make_qr_base64(join_url)
     return render_template("host.html", code=code, join_url=join_url, qr_b64=qr_b64)
 
@@ -291,8 +340,10 @@ def create_room():
     rooms[code] = {"created_at": time.time(), "queue": [], "now_playing": None,
                     "next_item_id": 1, "paused": False}
     save_rooms()
-    local_ip = get_local_ip()
-    join_url = f"http://{local_ip}:5000/join/{code}"
+    if IS_RENDER:
+        join_url = f"https://{request.host}/join/{code}"
+    else:
+        join_url = f"http://{get_local_ip()}:5000/join/{code}"
     return jsonify({"code": code, "join_url": join_url})
 
 
@@ -436,6 +487,28 @@ def api_top():
     return jsonify({"results": results})
 
 
+@app.route("/api/join/suggestions")
+def api_join_suggestions():
+    seed_youtube_suggestions()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT video_id, title, artist, play_count FROM youtube_songs ORDER BY play_count DESC LIMIT 12"
+    ).fetchall()
+    conn.close()
+    results = [
+        {
+            "video_id": r["video_id"],
+            "title": r["title"],
+            "artist": r["artist"],
+            "play_count": r["play_count"],
+            "thumbnail_url": f"https://img.youtube.com/vi/{r['video_id']}/mqdefault.jpg",
+        }
+        for r in rows
+    ]
+    return jsonify({"results": results})
+
+
 def advance_queue(room, code):
     """Pop next from queue, set as now_playing, emit updates, return item or None."""
     if not room["queue"]:
@@ -460,6 +533,18 @@ def advance_queue(room, code):
             pass
     elif item["source"] == "youtube":
         item["media_url"] = f"/api/yt/{item['source_ref']}"
+        try:
+            c = sqlite3.connect(DB_PATH)
+            now = time.time()
+            c.execute(
+                "INSERT INTO youtube_songs (video_id, title, artist, play_count, last_played) VALUES (?, ?, ?, 1, ?) "
+                "ON CONFLICT(video_id) DO UPDATE SET play_count = play_count + 1, last_played = ?",
+                (item["source_ref"], item["title"], item.get("artist", ""), now, now),
+            )
+            c.commit()
+            c.close()
+        except Exception:
+            pass
 
     play_media(item)
     socketio.emit("queue_update", {"queue": room["queue"]}, to=code)
@@ -598,8 +683,15 @@ def api_vocal_yt(vid):
         return jsonify({"error": f"stream unavailable: {str(e)}"}), 500
 
 
-FFMPEG_BIN = os.path.join(os.path.dirname(__file__), "bin", "ffmpeg.exe")
-FFMPEG = FFMPEG_BIN if os.path.isfile(FFMPEG_BIN) else "ffmpeg"
+_BIN_DIR = os.path.join(os.path.dirname(__file__), "bin")
+FFMPEG_BIN_WIN = os.path.join(_BIN_DIR, "ffmpeg.exe")
+FFMPEG_BIN_NIX = os.path.join(_BIN_DIR, "ffmpeg")
+if os.path.isfile(FFMPEG_BIN_WIN):
+    FFMPEG = FFMPEG_BIN_WIN
+elif os.path.isfile(FFMPEG_BIN_NIX):
+    FFMPEG = FFMPEG_BIN_NIX
+else:
+    FFMPEG = "ffmpeg"
 
 
 VOCAL_KILL = (
@@ -773,7 +865,7 @@ def on_join(data):
 if __name__ == "__main__":
     import argparse
 
-    if not check_hardware_lock():
+    if not IS_RENDER and not check_hardware_lock():
         sys.exit(1)
 
     parser = argparse.ArgumentParser()
@@ -781,9 +873,6 @@ if __name__ == "__main__":
                         help="Browser mode passed by launcher (handled externally)")
     args = parser.parse_args()
 
-    init_db()
-    load_rooms()
-    scan_library()
     ip = get_local_ip()
     print(f"\nKaraokeHub running.\n  On this laptop:  http://localhost:5000\n  On phones (same WiFi): http://{ip}:5000\n")
 

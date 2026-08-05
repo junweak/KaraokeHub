@@ -2,5 +2,6 @@ flask==3.0.3
 flask-socketio==5.3.6
 python-socketio==5.11.2
 eventlet==0.36.1
+gunicorn>=22.0.0
 qrcode[pil]==7.4.2
 yt-dlp>=2024.12.0

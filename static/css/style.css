@@ -757,6 +757,90 @@ input[type="text"].sink {
 }
 .add-btn:hover { border-color: var(--pink); color: var(--pink); }
 
+/* Suggestion grid */
+.suggestion-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.suggestion-card {
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-color 0.2s ease, transform 0.15s ease;
+  display: flex;
+  flex-direction: column;
+}
+.suggestion-card:hover {
+  border-color: var(--pink);
+  transform: translateY(-2px);
+}
+.suggestion-thumb-wrap {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: var(--surface);
+}
+.suggestion-thumb-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.suggestion-add-btn {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: var(--pink);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.suggestion-card:hover .suggestion-add-btn {
+  opacity: 1;
+  transform: scale(1);
+}
+.suggestion-add-btn:hover {
+  filter: brightness(1.15);
+}
+.suggestion-info {
+  padding: 8px 10px 10px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.suggestion-title {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.suggestion-artist {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Album art / audio player */
 .album-art-default {
   width: 100%;

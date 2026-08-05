@@ -29,6 +29,7 @@ const searchInput = document.getElementById('searchInput');
 const joinSearchClear = document.getElementById('joinSearchClear');
 const joinNowPlayingCard = document.getElementById('joinNowPlayingCard');
 const joinSetlistCard = document.getElementById('joinSetlistCard');
+const joinSuggestionsCard = document.getElementById('joinSuggestionsCard');
 const results = document.getElementById('results');
 let debounceTimer;
 let searchMode = "karaoke";
@@ -37,6 +38,7 @@ function updateJoinSearchUI(active) {
   joinSearchClear.classList.toggle('visible', active);
   joinNowPlayingCard.style.display = active ? 'none' : '';
   joinSetlistCard.style.display = active ? 'none' : '';
+  joinSuggestionsCard.style.display = active ? 'none' : '';
   const headerH = document.querySelector('#joinSearchCard .search-sticky-header')?.offsetHeight || 90;
   results.style.maxHeight = active ? `calc(100vh - ${headerH + 32}px)` : '420px';
   document.querySelector('.container-join').classList.toggle('searching', active);
@@ -283,6 +285,49 @@ fetch(`/api/rooms/${CODE}`).then(r => r.json()).then(data => {
 
 // load browse on first tab click
 loadBrowse();
+fetchSuggestions();
+
+// --- Suggestions ---
+const joinSuggestionsCard = document.getElementById('joinSuggestionsCard');
+
+async function fetchSuggestions() {
+  const grid = document.getElementById('suggestionGrid');
+  try {
+    const res = await fetch('/api/join/suggestions');
+    const data = await res.json();
+    renderSuggestions(data.results || [], grid);
+  } catch (e) {
+    grid.innerHTML = '';
+  }
+}
+
+function renderSuggestions(results, grid) {
+  if (!results.length) {
+    grid.innerHTML = '<div class="empty-state" style="padding:10px;font-size:12px;">No suggestions yet — play some YouTube songs to get started.</div>';
+    return;
+  }
+  grid.innerHTML = results.map(s => `
+    <div class="suggestion-card">
+      <div class="suggestion-thumb-wrap">
+        <img src="${s.thumbnail_url}" alt="${escapeHtml(s.title)}" loading="lazy">
+        <button class="suggestion-add-btn" onclick='addSuggestion(this, ${JSON.stringify({id: s.video_id, title: s.title, artist: s.artist, source: "youtube", source_ref: s.video_id}).replace(/'/g, "&#39;")})'>+</button>
+      </div>
+      <div class="suggestion-info">
+        <div class="suggestion-title">${escapeHtml(s.title)}</div>
+        <div class="suggestion-artist">${escapeHtml(s.artist || 'YouTube')}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function addSuggestion(btn, song) {
+  flyToQueue(btn, song);
+  await fetch(`/api/rooms/${CODE}/queue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...song, requested_by: myName })
+  });
+}
 
 // --- Now Playing + controls ---
 function updateNowPlaying(item) {
