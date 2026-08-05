@@ -11,4 +11,4 @@ services:
       mkdir -p bin
       curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ffmpeg.tar.xz
       tar -xJf /tmp/ffmpeg.tar.xz --strip-components=1 -C bin/ --wildcards "*/ffmpeg" "*/ffprobe"
-    startCommand: python run_prod.py
+    startCommand: python -c "import eventlet; eventlet.monkey_patch(); import run_prod"
