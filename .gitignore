@@ -7,4 +7,5 @@ stdout*.txt
 stderr*.txt
 bin/
 cache/
+warp_data/
 .hardware_lock
