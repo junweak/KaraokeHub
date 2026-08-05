@@ -37,6 +37,7 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "karaokehub-dev-secret")
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 IS_RENDER = bool(os.environ.get("RENDER"))
+WARP_SOCKS = os.environ.get("WARP_SOCKS", "")
 
 # ---------------------------------------------------------------------------
 # In-memory room/queue state (persisted to disk for crash recovery)
@@ -160,6 +161,15 @@ def init_db():
     conn.close()
 
 
+def _ydl_opts(extra=None):
+    opts = {"quiet": True, "no_warnings": True}
+    if WARP_SOCKS:
+        opts["proxy"] = WARP_SOCKS
+    if extra:
+        opts.update(extra)
+    return opts
+
+
 def seed_youtube_suggestions():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -169,7 +179,7 @@ def seed_youtube_suggestions():
         return
     try:
         from yt_dlp import YoutubeDL
-        ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
+        ydl_opts = _ydl_opts({"extract_flat": True})
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info("ytsearch12:popular karaoke songs", download=False)
             now = time.time()
@@ -265,12 +275,7 @@ def search_youtube(query: str, limit: int = 5, suffix: str = ""):
         if suffix:
             q += f" {suffix}"
 
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": True,
-            "skip_download": True,
-        }
+        ydl_opts = _ydl_opts({"extract_flat": True, "skip_download": True})
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(q, download=False)
             results = []
@@ -532,7 +537,7 @@ def advance_queue(room, code):
         except Exception:
             pass
     elif item["source"] == "youtube":
-        item["media_url"] = f"/api/yt/{item['source_ref']}"
+        item["media_url"] = f"/api/stream/yt/{item['source_ref']}"
         try:
             c = sqlite3.connect(DB_PATH)
             now = time.time()
@@ -576,7 +581,7 @@ def api_serve_media():
 def api_yt_stream(vid):
     try:
         from yt_dlp import YoutubeDL
-        ydl_opts = {"quiet": True, "no_warnings": True, "format": "best[ext=mp4][height<=720]/best[ext=mp4]/best"}
+        ydl_opts = _ydl_opts({"format": "best[ext=mp4][height<=720]/best[ext=mp4]/best"})
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
             url = info.get("url")
@@ -595,50 +600,64 @@ def api_yt_stream(vid):
 @app.route("/api/stream/yt/<vid>")
 def api_stream_yt(vid):
     try:
-        from yt_dlp import YoutubeDL
-        ydl_opts = {"quiet": True, "no_warnings": True, "format": "best[height<=720]/best"}
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
-            url = info.get("url")
-            if not url:
-                for fmt in info.get("formats", []):
-                    if fmt.get("acodec") != "none" and fmt.get("vcodec") != "none":
-                        url = fmt.get("url")
-                        if url:
-                            break
-            if not url:
-                return jsonify({"error": "no stream URL"}), 500
-
-            cmd = [
-                FFMPEG, "-i", url,
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                "-movflags", "frag_keyframe+empty_moov",
-                "-f", "mp4",
-                "pipe:1"
-            ]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-
-            def generate():
-                try:
-                    while True:
-                        chunk = proc.stdout.read(8192)
-                        if not chunk:
-                            break
-                        yield chunk
-                except GeneratorExit:
-                    pass
-                finally:
-                    try:
-                        proc.kill()
-                        proc.wait()
-                    except Exception:
-                        pass
-
-            resp = Response(generate(), mimetype="video/mp4")
-            resp.headers["Content-Disposition"] = "inline"
-            return resp
+        return _stream_yt_via_proxy(vid, vocal=False)
     except Exception:
         return jsonify({"error": "stream unavailable"}), 500
+
+
+def _stream_yt_via_proxy(vid, vocal=True):
+    yt_cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--quiet", "--no-warnings", "--no-check-certificates",
+        "-f", "best[height<=720]/best",
+        "-o", "-",
+    ]
+    if WARP_SOCKS:
+        yt_cmd += ["--proxy", WARP_SOCKS]
+    yt_cmd.append(f"https://www.youtube.com/watch?v={vid}")
+
+    yt_proc = subprocess.Popen(yt_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    if vocal:
+        ffmpeg_cmd = [
+            FFMPEG, "-i", "pipe:0",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-af", VOCAL_KILL,
+            "-movflags", "frag_keyframe+empty_moov",
+            "-f", "mp4", "pipe:1"
+        ]
+    else:
+        ffmpeg_cmd = [
+            FFMPEG, "-i", "pipe:0",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "frag_keyframe+empty_moov",
+            "-f", "mp4", "pipe:1"
+        ]
+
+    ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=yt_proc.stdout,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    yt_proc.stdout.close()
+
+    def generate():
+        try:
+            while True:
+                chunk = ffmpeg_proc.stdout.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+        except GeneratorExit:
+            pass
+        finally:
+            for p in (yt_proc, ffmpeg_proc):
+                try:
+                    p.kill()
+                    p.wait()
+                except Exception:
+                    pass
+
+    resp = Response(generate(), mimetype="video/mp4")
+    resp.headers["Content-Disposition"] = "inline"
+    return resp
 
 
 @app.route("/api/media/vocal")
@@ -664,21 +683,7 @@ def api_vocal_media():
 @app.route("/api/media/vocal/yt/<vid>")
 def api_vocal_yt(vid):
     try:
-        from yt_dlp import YoutubeDL
-        ydl_opts = {"quiet": True, "no_warnings": True, "format": "best[height<=720]/best"}
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
-            url = info.get("url")
-            if not url:
-                for fmt in info.get("formats", []):
-                    if fmt.get("acodec") != "none" and fmt.get("vcodec") != "none":
-                        url = fmt.get("url")
-                        if url:
-                            break
-            if not url:
-                return jsonify({"error": "no stream URL"}), 500
-
-            return _stream_vocal_reduction(url, is_video=True)
+        return _stream_yt_via_proxy(vid, vocal=True)
     except Exception as e:
         return jsonify({"error": f"stream unavailable: {str(e)}"}), 500
 
