@@ -228,10 +228,16 @@ def scan_library():
                         (title, artist, rel),
                     )
 
-    # remove entries for files that no longer exist
-    removed = existing - found
+    # Remove entries for files that no longer exist. Absolute paths come from
+    # scan_folder() (arbitrary/USB folders) and are never under LIBRARY_DIR, so a
+    # relative-path diff would delete them on every rescan; prune them only when
+    # the file itself is gone.
+    removed = {rel for rel in existing if not os.path.isabs(rel)} - found
     for rel in removed:
         cur.execute("DELETE FROM songs WHERE filepath = ?", (rel,))
+    for entry in existing:
+        if os.path.isabs(entry) and not Path(entry).exists():
+            cur.execute("DELETE FROM songs WHERE filepath = ?", (entry,))
 
     conn.commit()
     conn.close()
